@@ -2016,11 +2016,11 @@ abstract contract StratX4 is Ownable, ReentrancyGuard, Pausable {
                 IERC20(token0AddressX2).safeApprove(uniRouterAddress, 0);
                 IERC20(token0AddressX2).safeIncreaseAllowance(
                         uniRouterAddress,
-                        token1Amt
+                        token0Amt
                 );
                 _safeSwap(
                     uniRouterAddress,
-                    token1Amt,
+                    token0Amt,
                     slippageFactor,
                     token0ToWantPathX2,
                     address(this),

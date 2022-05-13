@@ -16,3 +16,4 @@ contracts/StratX2_AUTO.sol
 contracts/StratX2_BAKE.sol
 contracts/StratX2_MDEX.sol
 contracts/StratVLEV2.sol
+misc/

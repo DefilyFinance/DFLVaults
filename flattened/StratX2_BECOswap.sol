@@ -1396,7 +1396,7 @@ interface IPancakeswapFarm {
         returns (uint256);
 
     // Deposit LP tokens to MasterChef for CAKE allocation.
-    function deposit(uint256 _pid, uint256 _amount) external;
+    function deposit(uint256 _pid, uint256 _amount, address _referrer) external;
 
     // Withdraw LP tokens from MasterChef.
     function withdraw(uint256 _pid, uint256 _amount) external;
@@ -1756,7 +1756,7 @@ contract Pausable is Context {
     }
 }
 
-// File: contracts/StratX4.sol
+// File: contracts/StratX2.sol
 
 
 
@@ -1776,27 +1776,16 @@ interface IWBNB is IERC20 {
     function withdraw(uint256 wad) external;
 }
 
-interface IDRAGON{
-    function wrapAllDFL() external;
-    function wrapAmountDFL(uint256 _amount) external;
-}
-
-interface IVault{
-    function stakedWantTokens(address _user) external view returns (uint256);
-    function userInfo(address _user) external view returns (uint256);
-    function deposit(uint256 _wantAmt) external;
-    function withdraw(uint256 _wantAmt) external;
-}
 
 
-abstract contract StratX4 is Ownable, ReentrancyGuard, Pausable {
+abstract contract StratX2 is Ownable, ReentrancyGuard, Pausable {
     // Maximises yields in pancakeswap
 
     using SafeMath for uint256;
     using SafeERC20 for IERC20;
 
     bool public isCAKEStaking; // only for staking CAKE using pancakeswap's native CAKE staking contract.
-    bool public isDRAGON;
+    bool public isSameAssetDeposit;
     bool public isAutoComp; // this vault is purely for staking. eg. WBNB-AUTO staking vault.
 
     address public farmContractAddress; // address of farm, eg, PCS, Thugs etc.
@@ -1838,25 +1827,15 @@ abstract contract StratX4 is Ownable, ReentrancyGuard, Pausable {
     uint256 public slippageFactor = 950; // 5% default slippage tolerance
     uint256 public constant slippageFactorUL = 995;
 
+    uint256 public safeSwapFactor = 1;
+
     address[] public earnedToAUTOPath;
     address[] public earnedToToken0Path;
     address[] public earnedToToken1Path;
     address[] public token0ToEarnedPath;
     address[] public token1ToEarnedPath;
-    address private DRAGONAdress = 0x18f4f7A1fa6F2c93d40d4Fd83c67E93B88d3a0b1;
-
-    uint256 public safeSwapFactor = 1;
-
-    address[] public earnedToToken0PathX2;
-    address[] public earnedToToken1PathX2;
-    address[] public token0ToWantPathX2;
-    address[] public token1ToWantPathX2;
-    address public wantAddressX2;
-    address public token0AddressX2;
-    address public token1AddressX2;
-    address public earnedAddressX2;
-    address public farmContractAddressX2;
-    address public vaultX2Address;
+    address private BECORefAddress = 0x000000000000000000000000000000000000dEaD;
+    address public buyBackDex = 0x66153fDc998252C0A98764933e2fC8D1B1009C2B;
 
     event SetSettings(
         uint256 _entranceFeeFactor,
@@ -1889,7 +1868,7 @@ abstract contract StratX4 is Ownable, ReentrancyGuard, Pausable {
         if (isAutoComp) {
             earn();
         }
-
+        
         IERC20(wantAddress).safeTransferFrom(
             address(msg.sender),
             address(this),
@@ -1928,19 +1907,7 @@ abstract contract StratX4 is Ownable, ReentrancyGuard, Pausable {
         if (isCAKEStaking) {
             IPancakeswapFarm(farmContractAddress).enterStaking(wantAmt); // Just for CAKE staking, we dont use deposit()
         } else {
-            IPancakeswapFarm(farmContractAddress).deposit(pid, wantAmt);
-        }
-    }
-
-    function _farmVault() internal virtual {
-        require(isAutoComp, "!isAutoComp");
-        uint256 wantAmt = IERC20(wantAddressX2).balanceOf(address(this));
-        IERC20(wantAddressX2).safeIncreaseAllowance(vaultX2Address, wantAmt);
-
-        if (isCAKEStaking) {
-            IPancakeswapFarm(farmContractAddress).enterStaking(wantAmt); // Just for CAKE staking, we dont use deposit()
-        } else {
-            IVault(vaultX2Address).deposit(wantAmt);
+            IPancakeswapFarm(farmContractAddress).deposit(pid, wantAmt, BECORefAddress);
         }
     }
 
@@ -1952,20 +1919,12 @@ abstract contract StratX4 is Ownable, ReentrancyGuard, Pausable {
         }
     }
 
-    function _unfarmVault(uint256 _wantAmt) internal virtual {
-        if (isCAKEStaking) {
-            IPancakeswapFarm(farmContractAddress).enterStaking(_wantAmt); // Just for CAKE staking, we dont use deposit()
-        } else {
-            IVault(vaultX2Address).withdraw(_wantAmt);
-        }
-    }
-
     function withdraw(address _userAddress, uint256 _wantAmt)
         public
         virtual
         onlyOwner
         nonReentrant
-        returns (uint256,uint256)
+        returns (uint256)
     {
         require(_wantAmt > 0, "_wantAmt <= 0");
 
@@ -1973,7 +1932,7 @@ abstract contract StratX4 is Ownable, ReentrancyGuard, Pausable {
         if (sharesRemoved > sharesTotal) {
             sharesRemoved = sharesTotal;
         }
-        // sharesTotal = sharesTotal.sub(sharesRemoved);
+        sharesTotal = sharesTotal.sub(sharesRemoved);
 
         if (withdrawFeeFactor < withdrawFeeFactorMax) {
             _wantAmt = _wantAmt.mul(withdrawFeeFactor).div(
@@ -1994,81 +1953,15 @@ abstract contract StratX4 is Ownable, ReentrancyGuard, Pausable {
             _wantAmt = wantLockedTotal;
         }
 
-        uint256 subAmt = _wantAmt;
         wantLockedTotal = wantLockedTotal.sub(_wantAmt);
 
-        uint256 removedAmt = IVault(vaultX2Address).stakedWantTokens(address(this)).mul(sharesRemoved).div(sharesTotal);
-        uint256 earningAmount = IERC20(earnedAddress).balanceOf(address(this));
-        if(removedAmt > 0 && isAutoComp){
-            _unfarmVault(removedAmt);
-            uint256 removedLPAmt = IERC20(wantAddressX2).balanceOf(address(this));
-            IERC20(wantAddressX2).safeApprove(uniRouterAddress, 0);
-            IERC20(wantAddressX2).safeIncreaseAllowance(
-                    uniRouterAddress,
-                    removedLPAmt
-            );
-            (uint256 token0Amt,uint256 token1Amt) = IPancakeRouter02(uniRouterAddress).removeLiquidity(
-                token0AddressX2,
-                token1AddressX2,
-                removedLPAmt,
-                0,
-                0,
-                address(this),
-                block.timestamp.add(600)
-            );
-            if(token0AddressX2 != AUTOAddress){
-                IERC20(token0AddressX2).safeApprove(uniRouterAddress, 0);
-                IERC20(token0AddressX2).safeIncreaseAllowance(
-                        uniRouterAddress,
-                        token0Amt
-                );
-                _safeSwap(
-                    uniRouterAddress,
-                    token0Amt,
-                    slippageFactor,
-                    token0ToWantPathX2,
-                    address(this),
-                    block.timestamp.add(600)
-                );
-            }
-            if(token1AddressX2 != AUTOAddress){
-                IERC20(token1AddressX2).safeApprove(uniRouterAddress, 0);
-                IERC20(token1AddressX2).safeIncreaseAllowance(
-                        uniRouterAddress,
-                        token1Amt
-                );
-                _safeSwap(
-                    uniRouterAddress,
-                    token1Amt,
-                    slippageFactor,
-                    token1ToWantPathX2,
-                    address(this),
-                    block.timestamp.add(600)
-                );
-            }
-
-            uint256 DFLAmount = IERC20(AUTOAddress).balanceOf(address(this));
-            if(earnedAddress == AUTOAddress){
-                DFLAmount = DFLAmount.sub(earningAmount);
-            }
-            IERC20(earnedAddress).safeApprove(DRAGONAdress, 0);
-            IERC20(earnedAddress).safeIncreaseAllowance(
-                DRAGONAdress,
-                DFLAmount
-            );
-            IDRAGON(DRAGONAdress).wrapAmountDFL(DFLAmount);
-        }
-
-        _wantAmt = IERC20(wantAddress).balanceOf(address(this));
-    
-        sharesTotal = sharesTotal.sub(sharesRemoved);
         IERC20(wantAddress).safeTransfer(autoFarmAddress, _wantAmt);
         
         if (isAutoComp) {
             earn();
         }
 
-        return (sharesRemoved,subAmt);
+        return sharesRemoved;
     }
 
     // 1. Harvest farm tokens
@@ -2076,6 +1969,10 @@ abstract contract StratX4 is Ownable, ReentrancyGuard, Pausable {
     // 3. Deposits want tokens
 
     function earn() public virtual whenNotPaused onlyOwner {
+        require(isAutoComp, "!isAutoComp");
+        // if (onlyGov) {
+        //     require(msg.sender == govAddress, "!gov");
+        // }
 
         // Harvest farm tokens
         _unfarm(0);
@@ -2087,7 +1984,7 @@ abstract contract StratX4 is Ownable, ReentrancyGuard, Pausable {
         // Converts farm tokens into want tokens
         uint256 earnedAmt = IERC20(earnedAddress).balanceOf(address(this));
 
-        if(earnedAmt.div(4).div(safeSwapFactor) <= 0){
+        if(earnedAmt.div(2).div(safeSwapFactor) <= 0){
             lastEarnBlock = block.number;
             _farm();
             return;
@@ -2096,76 +1993,69 @@ abstract contract StratX4 is Ownable, ReentrancyGuard, Pausable {
         earnedAmt = distributeFees(earnedAmt);
         earnedAmt = buyBack(earnedAmt);
 
-        if (isCAKEStaking || isDRAGON) {
-            IERC20(earnedAddress).safeApprove(DRAGONAdress, 0);
-            IERC20(earnedAddress).safeIncreaseAllowance(
-                DRAGONAdress,
-                earnedAmt.div(2)
-            );
-
-            IDRAGON(DRAGONAdress).wrapAmountDFL(earnedAmt.div(2));
-            _farm();
-
-            IERC20(earnedAddress).safeApprove(uniRouterAddress, 0);
-            IERC20(earnedAddress).safeIncreaseAllowance(
-                uniRouterAddress,
-                earnedAmt.div(2)
-            );
-
-            if(earnedAddress != token0AddressX2){
-                _safeSwap(
-                    uniRouterAddress,
-                    earnedAmt.div(4),
-                    slippageFactor,
-                    earnedToToken0PathX2,
-                    address(this),
-                    block.timestamp.add(600)
-                );
-            }
-            if(earnedAddress != token1AddressX2){
-                _safeSwap(
-                    uniRouterAddress,
-                    earnedAmt.div(4),
-                    slippageFactor,
-                    earnedToToken1PathX2,
-                    address(this),
-                    block.timestamp.add(600)
-                );
-            }
-            
-            // Get want tokens, ie. add liquidity
-            uint256 token0Amt = IERC20(token0AddressX2).balanceOf(address(this));
-            uint256 token1Amt = IERC20(token1AddressX2).balanceOf(address(this));
-            if (token0Amt > 0 && token1Amt > 0) {
-                IERC20(token0AddressX2).safeIncreaseAllowance(
-                    uniRouterAddress,
-                    token0Amt
-                );
-                IERC20(token1AddressX2).safeIncreaseAllowance(
-                    uniRouterAddress,
-                    token1Amt
-                );
-                IPancakeRouter02(uniRouterAddress).addLiquidity(
-                    token0AddressX2,
-                    token1AddressX2,
-                    token0Amt,
-                    token1Amt,
-                    0,
-                    0,
-                    address(this),
-                    block.timestamp.add(600)
-                );
-            }
-
-            _farmVault();
-            
+        if (isCAKEStaking || isSameAssetDeposit) {
             lastEarnBlock = block.number;
+            _farm();
             return;
         }
-        _farm();
-        _farmVault();
+
+        IERC20(earnedAddress).safeApprove(uniRouterAddress, 0);
+        IERC20(earnedAddress).safeIncreaseAllowance(
+            uniRouterAddress,
+            earnedAmt
+        );
+
+        if (earnedAddress != token0Address) {
+            // Swap half earned to token0
+            _safeSwap(
+                uniRouterAddress,
+                earnedAmt.div(2),
+                slippageFactor,
+                earnedToToken0Path,
+                address(this),
+                block.timestamp.add(600)
+            );
+        }
+
+        if (earnedAddress != token1Address) {
+            // Swap half earned to token1
+            _safeSwap(
+                uniRouterAddress,
+                earnedAmt.div(2),
+                slippageFactor,
+                earnedToToken1Path,
+                address(this),
+                block.timestamp.add(600)
+            );
+        }
+
+        // Get want tokens, ie. add liquidity
+        uint256 token0Amt = IERC20(token0Address).balanceOf(address(this));
+        uint256 token1Amt = IERC20(token1Address).balanceOf(address(this));
+        if (token0Amt > 0 && token1Amt > 0) {
+            IERC20(token0Address).safeIncreaseAllowance(
+                uniRouterAddress,
+                token0Amt
+            );
+            IERC20(token1Address).safeIncreaseAllowance(
+                uniRouterAddress,
+                token1Amt
+            );
+            IPancakeRouter02(uniRouterAddress).addLiquidity(
+                token0Address,
+                token1Address,
+                token0Amt,
+                token1Amt,
+                0,
+                0,
+                address(this),
+                block.timestamp.add(600)
+            );
+        }
+
         lastEarnBlock = block.number;
-        return;
+
+        _farm();
     }
 
     function buyBack(uint256 _earnedAmt) internal virtual returns (uint256) {
@@ -2179,12 +2069,12 @@ abstract contract StratX4 is Ownable, ReentrancyGuard, Pausable {
             IERC20(earnedAddress).safeTransfer(buyBackAddress, buyBackAmt);
         } else {
             IERC20(earnedAddress).safeIncreaseAllowance(
-                uniRouterAddress,
+                buyBackDex,
                 buyBackAmt
             );
 
             _safeSwap(
-                uniRouterAddress,
+                buyBackDex,
                 buyBackAmt,
                 slippageFactor,
                 earnedToAUTOPath,
@@ -2219,44 +2109,6 @@ abstract contract StratX4 is Ownable, ReentrancyGuard, Pausable {
         require(!isCAKEStaking, "isCAKEStaking");
 
         // Converts dust tokens into earned tokens, which will be reinvested on the next earn().
-
-        // Converts token0X2 dust (if any) to earned tokens
-        uint256 token0AmtX2 = IERC20(token0AddressX2).balanceOf(address(this));
-        if (token0AddressX2 != wantAddress && token0AmtX2 > 0) {
-            IERC20(token0AddressX2).safeIncreaseAllowance(
-                uniRouterAddress,
-                token0AmtX2
-            );
-
-            // Swap all dust tokens to earned tokens
-            _safeSwap(
-                uniRouterAddress,
-                token0AmtX2,
-                slippageFactor,
-                token0ToWantPathX2,
-                address(this),
-                block.timestamp.add(600)
-            );
-        }
-
-        // Converts token1X2 dust (if any) to earned tokens
-        uint256 token1AmtX2 = IERC20(token1AddressX2).balanceOf(address(this));
-        if (token1AddressX2 != wantAddress && token1AmtX2 > 0) {
-            IERC20(token1AddressX2).safeIncreaseAllowance(
-                uniRouterAddress,
-                token1AmtX2
-            );
-
-            // Swap all dust tokens to earned tokens
-            _safeSwap(
-                uniRouterAddress,
-                token1AmtX2,
-                slippageFactor,
-                token1ToWantPathX2,
-                address(this),
-                block.timestamp.add(600)
-            );
-        }
 
         // Converts token0 dust (if any) to earned tokens
         uint256 token0Amt = IERC20(token0Address).balanceOf(address(this));
@@ -2303,10 +2155,6 @@ abstract contract StratX4 is Ownable, ReentrancyGuard, Pausable {
 
     function unpause() public virtual onlyAllowGov {
         _unpause();
-    }
-    
-    function updateDRAGON(address _newDRAGON) public onlyAllowGov {
-        DRAGONAdress = _newDRAGON;
     }
 
     function setSettings(
@@ -2356,9 +2204,17 @@ abstract contract StratX4 is Ownable, ReentrancyGuard, Pausable {
             _slippageFactor
         );
     }
-    
+
     function updateSafeSwapFactor(uint256 _newFactor) public onlyAllowGov {
         safeSwapFactor = _newFactor;
+    }
+    
+    function updateBECORefAddress(address _refAddress) public onlyAllowGov {
+        BECORefAddress = _refAddress;
+    }
+
+    function updateBuyBackDEX(address _BBDEX) public onlyAllowGov {
+        buyBackDex = _BBDEX;
     }
 
     function setGov(address _govAddress) public virtual onlyAllowGov {
@@ -2443,30 +2299,30 @@ abstract contract StratX4 is Ownable, ReentrancyGuard, Pausable {
     }
 }
 
-// File: contracts/StratX4_DRAGON.sol
+// File: contracts/StratX2_BECO.sol
 
 
 
 pragma solidity 0.6.12;
 
 
-contract StratX4_DRAGON is StratX4 {
+contract StratX2_BECO is StratX2 {
     constructor(
         address[] memory _addresses,
-        address[] memory _addressesX2,
         uint256 _pid,
-        bool[] memory _typeSettings,
+        bool _isCAKEStaking,
+        bool _isSameAssetDeposit,
+        bool _isAutoComp,
         address[] memory _earnedToAUTOPath,
         address[] memory _earnedToToken0Path,
         address[] memory _earnedToToken1Path,
-        address[] memory _earnedToToken0PathX2,
-        address[] memory _earnedToToken1PathX2,
         address[] memory _token0ToEarnedPath,
         address[] memory _token1ToEarnedPath,
-        address[] memory _token0ToWantPathX2,
-        address[] memory _token1ToWantPathX2,
         uint256 _safeSwapFactor,
-        uint256[] memory _fees
+        uint256 _controllerFee,
+        uint256 _buyBackRate,
+        uint256 _entranceFeeFactor,
+        uint256 _withdrawFeeFactor
     ) public {
         wbnbAddress = _addresses[0];
         govAddress = _addresses[1];
@@ -2480,9 +2336,9 @@ contract StratX4_DRAGON is StratX4 {
 
         farmContractAddress = _addresses[8];
         pid = _pid;
-        isCAKEStaking = _typeSettings[0];
-        isDRAGON = _typeSettings[1];
-        isAutoComp = _typeSettings[2];
+        isCAKEStaking = _isCAKEStaking;
+        isSameAssetDeposit = _isSameAssetDeposit;
+        isAutoComp = _isAutoComp;
 
         uniRouterAddress = _addresses[9];
         earnedToAUTOPath = _earnedToAUTOPath;
@@ -2491,23 +2347,12 @@ contract StratX4_DRAGON is StratX4 {
         token0ToEarnedPath = _token0ToEarnedPath;
         token1ToEarnedPath = _token1ToEarnedPath;
 
-        earnedToToken0PathX2 = _earnedToToken0PathX2;
-        earnedToToken1PathX2 = _earnedToToken1PathX2;
-        token0ToWantPathX2 = _token0ToWantPathX2;
-        token1ToWantPathX2 = _token1ToWantPathX2;
-        vaultX2Address = _addressesX2[0];
-        wantAddressX2 = _addressesX2[1];
-        token0AddressX2 = _addressesX2[2];
-        token1AddressX2 = _addressesX2[3];
-        earnedAddressX2 = _addressesX2[4];
-        farmContractAddressX2 = _addressesX2[5];
-
-        controllerFee = _fees[0];
+        controllerFee = _controllerFee;
         rewardsAddress = _addresses[10];
-        buyBackRate = _fees[1];
+        buyBackRate = _buyBackRate;
         buyBackAddress = _addresses[11];
-        entranceFeeFactor = _fees[2];
-        withdrawFeeFactor = _fees[3];
+        entranceFeeFactor = _entranceFeeFactor;
+        withdrawFeeFactor = _withdrawFeeFactor;
         safeSwapFactor = _safeSwapFactor;
 
         transferOwnership(autoFarmAddress);

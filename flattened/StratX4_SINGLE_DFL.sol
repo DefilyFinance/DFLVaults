@@ -1776,17 +1776,13 @@ interface IWBNB is IERC20 {
     function withdraw(uint256 wad) external;
 }
 
-interface IDRAGON{
-    function wrapAllDFL() external;
-    function wrapAmountDFL(uint256 _amount) external;
-}
-
 interface IVault{
     function stakedWantTokens(address _user) external view returns (uint256);
     function userInfo(address _user) external view returns (uint256);
     function deposit(uint256 _wantAmt) external;
     function withdraw(uint256 _wantAmt) external;
 }
+
 
 
 abstract contract StratX4 is Ownable, ReentrancyGuard, Pausable {
@@ -1796,7 +1792,7 @@ abstract contract StratX4 is Ownable, ReentrancyGuard, Pausable {
     using SafeERC20 for IERC20;
 
     bool public isCAKEStaking; // only for staking CAKE using pancakeswap's native CAKE staking contract.
-    bool public isDRAGON;
+    bool public isSingleStaking;
     bool public isAutoComp; // this vault is purely for staking. eg. WBNB-AUTO staking vault.
 
     address public farmContractAddress; // address of farm, eg, PCS, Thugs etc.
@@ -1838,14 +1834,13 @@ abstract contract StratX4 is Ownable, ReentrancyGuard, Pausable {
     uint256 public slippageFactor = 950; // 5% default slippage tolerance
     uint256 public constant slippageFactorUL = 995;
 
+    uint256 public safeSwapFactor = 1;
+
     address[] public earnedToAUTOPath;
     address[] public earnedToToken0Path;
     address[] public earnedToToken1Path;
     address[] public token0ToEarnedPath;
     address[] public token1ToEarnedPath;
-    address private DRAGONAdress = 0x18f4f7A1fa6F2c93d40d4Fd83c67E93B88d3a0b1;
-
-    uint256 public safeSwapFactor = 1;
 
     address[] public earnedToToken0PathX2;
     address[] public earnedToToken1PathX2;
@@ -1889,7 +1884,7 @@ abstract contract StratX4 is Ownable, ReentrancyGuard, Pausable {
         if (isAutoComp) {
             earn();
         }
-
+        
         IERC20(wantAddress).safeTransferFrom(
             address(msg.sender),
             address(this),
@@ -1973,7 +1968,7 @@ abstract contract StratX4 is Ownable, ReentrancyGuard, Pausable {
         if (sharesRemoved > sharesTotal) {
             sharesRemoved = sharesTotal;
         }
-        // sharesTotal = sharesTotal.sub(sharesRemoved);
+        //sharesTotal = sharesTotal.sub(sharesRemoved);
 
         if (withdrawFeeFactor < withdrawFeeFactorMax) {
             _wantAmt = _wantAmt.mul(withdrawFeeFactor).div(
@@ -1982,6 +1977,7 @@ abstract contract StratX4 is Ownable, ReentrancyGuard, Pausable {
         }
 
         if (isAutoComp) {
+            //_wantAmt = _wantAmt.mul(sharesRemoved).div(sharesTotal);
             _unfarm(_wantAmt);
         }
 
@@ -1998,7 +1994,6 @@ abstract contract StratX4 is Ownable, ReentrancyGuard, Pausable {
         wantLockedTotal = wantLockedTotal.sub(_wantAmt);
 
         uint256 removedAmt = IVault(vaultX2Address).stakedWantTokens(address(this)).mul(sharesRemoved).div(sharesTotal);
-        uint256 earningAmount = IERC20(earnedAddress).balanceOf(address(this));
         if(removedAmt > 0 && isAutoComp){
             _unfarmVault(removedAmt);
             uint256 removedLPAmt = IERC20(wantAddressX2).balanceOf(address(this));
@@ -2016,7 +2011,7 @@ abstract contract StratX4 is Ownable, ReentrancyGuard, Pausable {
                 address(this),
                 block.timestamp.add(600)
             );
-            if(token0AddressX2 != AUTOAddress){
+            if(token0AddressX2 != wantAddress){
                 IERC20(token0AddressX2).safeApprove(uniRouterAddress, 0);
                 IERC20(token0AddressX2).safeIncreaseAllowance(
                         uniRouterAddress,
@@ -2031,7 +2026,7 @@ abstract contract StratX4 is Ownable, ReentrancyGuard, Pausable {
                     block.timestamp.add(600)
                 );
             }
-            if(token1AddressX2 != AUTOAddress){
+            if(token1AddressX2 != wantAddress){
                 IERC20(token1AddressX2).safeApprove(uniRouterAddress, 0);
                 IERC20(token1AddressX2).safeIncreaseAllowance(
                         uniRouterAddress,
@@ -2046,23 +2041,16 @@ abstract contract StratX4 is Ownable, ReentrancyGuard, Pausable {
                     block.timestamp.add(600)
                 );
             }
-
-            uint256 DFLAmount = IERC20(AUTOAddress).balanceOf(address(this));
-            if(earnedAddress == AUTOAddress){
-                DFLAmount = DFLAmount.sub(earningAmount);
-            }
-            IERC20(earnedAddress).safeApprove(DRAGONAdress, 0);
-            IERC20(earnedAddress).safeIncreaseAllowance(
-                DRAGONAdress,
-                DFLAmount
-            );
-            IDRAGON(DRAGONAdress).wrapAmountDFL(DFLAmount);
+            _wantAmt = _wantAmt.add(IERC20(wantAddress).balanceOf(address(this)));
         }
 
-        _wantAmt = IERC20(wantAddress).balanceOf(address(this));
-    
+        wantAmt = IERC20(wantAddress).balanceOf(address(this));
+        if (_wantAmt > wantAmt) {
+            _wantAmt = wantAmt;
+        }
+
         sharesTotal = sharesTotal.sub(sharesRemoved);
-        IERC20(wantAddress).safeTransfer(autoFarmAddress, _wantAmt);
+        IERC20(token0Address).safeTransfer(autoFarmAddress, _wantAmt);
         
         if (isAutoComp) {
             earn();
@@ -2076,6 +2064,10 @@ abstract contract StratX4 is Ownable, ReentrancyGuard, Pausable {
     // 3. Deposits want tokens
 
     function earn() public virtual whenNotPaused onlyOwner {
+        require(isAutoComp, "!isAutoComp");
+        // if (onlyGov) {
+        //     require(msg.sender == govAddress, "!gov");
+        // }
 
         // Harvest farm tokens
         _unfarm(0);
@@ -2086,7 +2078,7 @@ abstract contract StratX4 is Ownable, ReentrancyGuard, Pausable {
 
         // Converts farm tokens into want tokens
         uint256 earnedAmt = IERC20(earnedAddress).balanceOf(address(this));
-
+        
         if(earnedAmt.div(4).div(safeSwapFactor) <= 0){
             lastEarnBlock = block.number;
             _farm();
@@ -2096,21 +2088,23 @@ abstract contract StratX4 is Ownable, ReentrancyGuard, Pausable {
         earnedAmt = distributeFees(earnedAmt);
         earnedAmt = buyBack(earnedAmt);
 
-        if (isCAKEStaking || isDRAGON) {
-            IERC20(earnedAddress).safeApprove(DRAGONAdress, 0);
-            IERC20(earnedAddress).safeIncreaseAllowance(
-                DRAGONAdress,
-                earnedAmt.div(2)
-            );
-
-            IDRAGON(DRAGONAdress).wrapAmountDFL(earnedAmt.div(2));
-            _farm();
-
+        if (isCAKEStaking || isSingleStaking) {
             IERC20(earnedAddress).safeApprove(uniRouterAddress, 0);
             IERC20(earnedAddress).safeIncreaseAllowance(
                 uniRouterAddress,
-                earnedAmt.div(2)
+                earnedAmt
             );
+
+            _safeSwap(
+                uniRouterAddress,
+                earnedAmt.div(2),
+                slippageFactor,
+                earnedToToken0Path,
+                address(this),
+                block.timestamp.add(600)
+            );
+            
+            _farm();
 
             if(earnedAddress != token0AddressX2){
                 _safeSwap(
@@ -2156,7 +2150,7 @@ abstract contract StratX4 is Ownable, ReentrancyGuard, Pausable {
                     block.timestamp.add(600)
                 );
             }
-
+            
             _farmVault();
             
             lastEarnBlock = block.number;
@@ -2304,10 +2298,6 @@ abstract contract StratX4 is Ownable, ReentrancyGuard, Pausable {
     function unpause() public virtual onlyAllowGov {
         _unpause();
     }
-    
-    function updateDRAGON(address _newDRAGON) public onlyAllowGov {
-        DRAGONAdress = _newDRAGON;
-    }
 
     function setSettings(
         uint256 _entranceFeeFactor,
@@ -2356,7 +2346,7 @@ abstract contract StratX4 is Ownable, ReentrancyGuard, Pausable {
             _slippageFactor
         );
     }
-    
+
     function updateSafeSwapFactor(uint256 _newFactor) public onlyAllowGov {
         safeSwapFactor = _newFactor;
     }
@@ -2443,14 +2433,14 @@ abstract contract StratX4 is Ownable, ReentrancyGuard, Pausable {
     }
 }
 
-// File: contracts/StratX4_DRAGON.sol
+// File: contracts/StratX4_SINGLE_DFL.sol
 
 
 
 pragma solidity 0.6.12;
 
 
-contract StratX4_DRAGON is StratX4 {
+contract StratX4_SINGLE_DFL is StratX4 {
     constructor(
         address[] memory _addresses,
         address[] memory _addressesX2,
@@ -2481,7 +2471,7 @@ contract StratX4_DRAGON is StratX4 {
         farmContractAddress = _addresses[8];
         pid = _pid;
         isCAKEStaking = _typeSettings[0];
-        isDRAGON = _typeSettings[1];
+        isSingleStaking = _typeSettings[1];
         isAutoComp = _typeSettings[2];
 
         uniRouterAddress = _addresses[9];
